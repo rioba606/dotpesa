@@ -1,0 +1,242 @@
+============================================================
+ dotPesa — backend structure (flat files, no implementation)
+============================================================
+
+Goal: mirror the endpoints the mock frontend is already calling,
+so swapping mock-api.js for real fetch() calls later is close
+to a 1:1 mapping.
+
+Stack assumption: Node.js + Express + PostgreSQL + Redis
++ Socket.IO + Safaricom Daraja API (M-Pesa STK push).
+
+Files (flat structure, each file exports its own router/function):
+
+  server.js        -> entry point, wires everything together
+  auth.js          -> authentication routes & middleware
+  wallet.js        -> wallet/balance & M-Pesa routes
+  game.js          -> game routes & round engine
+  db.js            -> database connection pool & queries
+  redis.js         -> Redis client & pub/sub helpers
+  socket.js        -> Socket.IO setup & event handlers
+  daraja.js        -> Safaricom Daraja API integration
+  crypto.js        -> JWT, password hashing, provably-fair generation
+  validation.js    -> request validation schemas
+  rate-limit.js    -> rate limiting configurations
+  config.js        -> environment variables & app config
+  logger.js        -> logging utilities
+
+
+------------------------------------------------------------
+server.js
+------------------------------------------------------------
+Responsibilities:
+  - Load config from config.js
+  - Create Express app
+  - Apply global middleware (helmet, cors, json parser, rate limiter)
+  - Mount routers:
+      app.use('/api/auth',   require('./auth'))
+      app.use('/api/wallet', require('./wallet'))
+      app.use('/api/game',   require('./game'))
+  - Initialize DB connection (db.js)
+  - Initialize Redis client (redis.js)
+  - Setup Socket.IO (socket.js) attached to HTTP server
+  - Start the crash round engine (from game.js) on boot
+  - Global error handler middleware
+  - app.listen(PORT)
+
+Owns:
+  - GET /health -> uptime/status check
+
+
+------------------------------------------------------------
+auth.js  (router: /api/auth)
+------------------------------------------------------------
+Endpoints:
+  POST   /signup             -> { username, phone, password }
+                                Creates user, seeds demo balance,
+                                returns JWT + user
+  POST   /login              -> { identifier, password }
+                                Returns JWT + user
+  POST   /logout             -> Invalidates session
+  POST   /refresh            -> { refreshToken } -> new access token
+  GET    /me                 -> Auth required, returns current user
+  POST   /verify-phone       -> { code } confirms OTP
+  POST   /forgot-password    -> { phone } sends reset OTP
+  POST   /reset-password     -> { phone, code, newPassword }
+
+Middleware exported:
+  requireAuth(req, res, next) -> Verifies JWT, attaches req.user
+
+
+------------------------------------------------------------
+wallet.js  (router: /api/wallet)
+------------------------------------------------------------
+Endpoints:
+  GET    /balance            -> ?mode=demo|real, auth required
+  GET    /transactions       -> Paginated transaction history
+  POST   /deposit/initiate   -> { phone, amount }
+                                Triggers Daraja STK push,
+                                returns { checkoutRequestId }
+  POST   /deposit/callback   -> Safaricom webhook (not called by frontend)
+  GET    /deposit/status/:checkoutRequestId
+                            -> Polling endpoint for STK status
+  POST   /withdraw           -> { phone, amount }
+                                B2C payout (KYC + min balance checks)
+  POST   /withdraw/callback  -> Daraja B2C result webhook
+  GET    /limits             -> Min/max deposit & withdraw amounts
+
+
+------------------------------------------------------------
+game.js  (router: /api/game + round engine)
+------------------------------------------------------------
+HTTP Endpoints:
+  GET    /current-round      -> phase, roundId, serverTime, etc.
+  GET    /history            -> Last N crash points (paginated)
+  GET    /live-bets          -> Bets for in-progress round
+  POST   /bet                -> { mode, stake, autoCashout }
+                                Only during "waiting" phase
+  POST   /cancel-bet         -> { betId } only during "waiting"
+  POST   /cashout            -> { betId } only during "running"
+
+Round Engine (internal):
+  - generateCrashPoint()     Provably-fair using HMAC-SHA256
+  - runRoundLoop()           waiting -> running -> crashed -> repeat
+  - Settles all bets (auto-cashouts + losses) at crash time
+
+Socket.IO Events (server -> client):
+  round:waiting   { roundId, startsInMs }
+  round:started   { roundId, serverStartTime }
+  round:tick      { multiplier, elapsedMs }
+  round:crashed   { roundId, crashPoint }
+  bet:placed      { username, stake }
+  bet:cashedOut   { username, multiplier, payout }
+
+
+------------------------------------------------------------
+db.js  (database layer)
+------------------------------------------------------------
+Exports:
+  - pool: PostgreSQL connection pool
+  - query(sql, params) -> Promise<Result>
+  - Transaction helper: withTransaction(callback)
+  - Queries organized by domain:
+      users:   create, findById, findByPhone, findByUsername
+      wallets: getBalance, updateBalance, getOrCreate
+      bets:    create, findActive, updateStatus
+      rounds:  create, findCurrent, updateCrashPoint
+      txs:     create, findByWallet, updateStatus
+      sessions: create, find, delete
+
+
+------------------------------------------------------------
+redis.js  (Redis layer)
+------------------------------------------------------------
+Exports:
+  - client: Redis client instance
+  - Round state helpers:
+      getRoundState(roundId), setRoundState(roundId, data)
+      getCurrentRound(), setCurrentRound(roundId)
+  - Pub/sub helpers:
+      publish(channel, message), subscribe(channel, handler)
+  - Rate limiting helpers:
+      checkRateLimit(key, windowMs, maxRequests)
+  - Session cache helpers:
+      cacheUser(userId), getCachedUser(userId)
+
+
+------------------------------------------------------------
+socket.js  (Socket.IO setup)
+------------------------------------------------------------
+Exports:
+  - setupSocket(server): Attaches Socket.IO to HTTP server
+  - Broadcast helpers:
+      broadcastToRoom(room, event, data)
+      broadcastToAll(event, data)
+  - Internal handlers:
+      onConnection(socket), onDisconnect(socket)
+      onAuthenticate(socket, token)
+  - Room management:
+      joinRoundRoom(socket, roundId)
+      leaveRoundRoom(socket, roundId)
+
+
+------------------------------------------------------------
+daraja.js  (Safaricom Daraja API)
+------------------------------------------------------------
+Exports:
+  - getAccessToken()         -> OAuth token with caching
+  - initiateSTKPush(phone, amount, accountRef)
+                            -> Returns { checkoutRequestId }
+  - querySTKStatus(checkoutRequestId)
+                            -> Returns status from Daraja
+  - initiateB2CPayout(phone, amount, reason)
+                            -> Returns { conversationId }
+  - verifyB2CResult(result) -> Parses and validates callback
+
+
+------------------------------------------------------------
+crypto.js  (Cryptographic utilities)
+------------------------------------------------------------
+Exports:
+  - hashPassword(password)   -> bcrypt hash
+  - comparePassword(password, hash) -> boolean
+  - signJWT(payload)         -> JWT token
+  - verifyJWT(token)         -> decoded payload
+  - generateCrashPoint(serverSeed, clientSeed, nonce)
+                            -> Provably-fair crash point
+  - generateSeeds()          -> { serverSeed, clientSeed, nonce }
+  - verifyCrashPoint(round)  -> Validates fairness
+
+
+------------------------------------------------------------
+validation.js  (Request validation)
+------------------------------------------------------------
+Exports schemas for:
+  - auth: signup, login, forgotPassword, resetPassword
+  - wallet: deposit, withdraw, transactionQuery
+  - game: bet, cancelBet, cashout
+  - Shared: phone, amount, pagination
+
+Each schema defines:
+  - body: fields expected in request body
+  - query: fields expected in URL query
+  - params: fields expected in URL parameters
+
+
+------------------------------------------------------------
+rate-limit.js  (Rate limiting)
+------------------------------------------------------------
+Exports configurations:
+  - loginLimiter: 5 attempts per 15 minutes per IP
+  - signupLimiter: 3 attempts per hour per IP
+  - betLimiter: 10 bets per 30 seconds per user
+  - depositLimiter: 5 deposits per minute per user
+  - withdrawalLimiter: 3 withdrawals per hour per user
+  - apiLimiter: 100 requests per minute per IP (global)
+
+Each config uses Redis store for distributed rate limiting.
+
+
+------------------------------------------------------------
+config.js  (Configuration)
+------------------------------------------------------------
+Exports object with:
+  - environment: 'development' | 'production' | 'test'
+  - port: number
+  - database: { host, port, user, password, database }
+  - redis: { host, port, password }
+  - jwt: { secret, expiresIn, refreshExpiresIn }
+  - daraja: { consumerKey, consumerSecret, passkey, shortcode }
+  - cors: { origin, credentials }
+  - logging: { level, format }
+  - game: { roundInterval, crashMultiplierMin, crashMultiplierMax }
+
+
+------------------------------------------------------------
+logger.js  (Logging)
+------------------------------------------------------------
+Exports:
+  - logger: Winston/Pino instance
+  - requestLogger: middleware for logging HTTP requests
+  - errorLogger: middleware for logging errors
+  - Methods: info, warn, error, debug, trace
