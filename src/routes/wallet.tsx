@@ -171,6 +171,7 @@ function DepositForm({ defaultPhone }: { defaultPhone: string }) {
   const [phone, setPhone] = useState(defaultPhone);
   const [amount, setAmount] = useState("500");
   const [stage, setStage] = useState<DepositStage>("idle");
+  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [txId, setTxId] = useState<string | null>(null);
 
@@ -184,8 +185,13 @@ function DepositForm({ defaultPhone }: { defaultPhone: string }) {
       setError("Enter a valid M-Pesa number (07... or 01...)");
       return;
     }
+    // Flip to a disabled/processing state immediately, before the network
+    // call resolves, so a slow request can't be double-clicked into two
+    // STK pushes.
+    setSubmitting(true);
     const res = await walletApi.depositInitiate(`254${phone}`, amt);
     if (!res.ok) {
+      setSubmitting(false);
       setError(res.error);
       return;
     }
@@ -200,6 +206,7 @@ function DepositForm({ defaultPhone }: { defaultPhone: string }) {
       const s = await walletApi.depositStatus(res.transactionId);
       if (s.status !== "pending") {
         setStage(s.status === "success" ? "success" : "failed");
+        setSubmitting(false);
         s.status === "success"
           ? toast.success(`Deposit of KES ${formatKES(amt)} confirmed`)
           : toast.error("Deposit failed or was cancelled");
@@ -207,10 +214,11 @@ function DepositForm({ defaultPhone }: { defaultPhone: string }) {
       }
     }
     setStage("failed");
+    setSubmitting(false);
     toast.error("Deposit timed out. Check your M-Pesa messages, or try again.");
   }
 
-  const busy = stage === "pushed" || stage === "polling";
+  const busy = submitting || stage === "pushed" || stage === "polling";
 
   return (
     <div className="panel-surface space-y-4 p-5">
@@ -239,14 +247,36 @@ function DepositForm({ defaultPhone }: { defaultPhone: string }) {
       </div>
       {error && <p className="text-sm text-destructive">{error}</p>}
 
+      {submitting && stage === "idle" && (
+        <div className="rounded-xl bg-elevated p-4 text-sm">
+          <p className="flex items-center gap-2">
+            <span className="size-2 animate-pulse rounded-full bg-primary" />
+            Sending STK push…
+          </p>
+        </div>
+      )}
+
       {stage !== "idle" && (
         <div className="rounded-xl bg-elevated p-4 text-sm">
-          {stage === "pushed" && <p>STK push sent — check your phone and enter your M-Pesa PIN.</p>}
+          {stage === "pushed" && (
+            <div className="space-y-1">
+              <p>STK push sent — check your phone and enter your M-Pesa PIN.</p>
+              <p className="text-xs text-muted-foreground">
+                The prompt will appear from <span className="font-semibold">GROVER COMMERCE</span> — that's us, so
+                don't be alarmed by the name.
+              </p>
+            </div>
+          )}
           {stage === "polling" && (
-            <p className="flex items-center gap-2">
-              <span className="size-2 animate-pulse rounded-full bg-primary" />
-              Waiting for M-Pesa confirmation…
-            </p>
+            <div className="space-y-1">
+              <p className="flex items-center gap-2">
+                <span className="size-2 animate-pulse rounded-full bg-primary" />
+                Waiting for M-Pesa confirmation…
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Please stay on this page until the transaction finishes processing.
+              </p>
+            </div>
           )}
           {stage === "success" && <p className="font-semibold text-primary">Deposit confirmed and credited.</p>}
           {stage === "failed" && <p className="font-semibold text-destructive">Deposit failed. No funds were taken.</p>}
