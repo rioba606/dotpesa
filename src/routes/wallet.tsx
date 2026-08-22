@@ -258,20 +258,16 @@ function DepositForm({ defaultPhone }: { defaultPhone: string }) {
 
       {stage !== "idle" && (
         <div className="rounded-xl bg-elevated p-4 text-sm">
-          {stage === "pushed" && (
-            <div className="space-y-1">
-              <p>STK push sent — check your phone and enter your M-Pesa PIN.</p>
-              <p className="text-xs text-muted-foreground">
-                The prompt will appear from <span className="font-semibold">GROVER COMMERCE</span> — that's us, so
-                don't be alarmed by the name.
-              </p>
-            </div>
-          )}
+          {stage === "pushed" && <p>STK push sent — check your phone and enter your M-Pesa PIN.</p>}
           {stage === "polling" && (
             <div className="space-y-1">
               <p className="flex items-center gap-2">
                 <span className="size-2 animate-pulse rounded-full bg-primary" />
                 Waiting for M-Pesa confirmation…
+              </p>
+              <p className="text-xs text-muted-foreground">
+                The prompt will appear from <span className="font-semibold">GROVER COMMERCE</span> — that's us, so
+                don't be alarmed by the name.
               </p>
               <p className="text-xs text-muted-foreground">
                 Please stay on this page until the transaction finishes processing.
